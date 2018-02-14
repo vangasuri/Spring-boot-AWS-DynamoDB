@@ -1,0 +1,98 @@
+variables:
+  SERVICE_NAME: "customer-profile-service" # Name of service
+  ROOT_PATH: ""  # Folder ver source code is, typically app, or just blank =""
+  BUILD_FOLDER: "build"
+
+.deploy_aws_template: &deploy_cloud
+    variables:
+      PROFILE: "--profile sandbox"
+      TARGET_ACCOUNT: "sandbox"
+      TARGET_ENV: "dev"
+    image: 660598663923.dkr.ecr.eu-central-1.amazonaws.com/awscli:latest
+    script:
+      - "echo Deploying ${SERVICE_NAME} application to ${TARGET_ENV} in ${TARGET_ACCOUNT}"
+      - "cd ${BUILD_FOLDER}/libs && rm *.original && mv *.jar application.jar"
+      - "aws s3 cp s3://ica-${TARGET_ACCOUNT}-eu-central-1/bastion-config ./.ebextensions/ --recursive ${PROFILE} --region eu-central-1"
+      - "eb init ${SERVICE_NAME} ${PROFILE} --region eu-central-1"
+      - "eb deploy ${TARGET_ACCOUNT}-${TARGET_ENV}-${SERVICE_NAME} ${PROFILE} --region eu-central-1 --timeout 40"
+    stage: sandbox
+    when: manual
+    environment:
+      name: "${TARGET_ACCOUNT}"
+    dependencies:
+      - build-gradle
+    except:
+      - tags
+
+.build: &build_gradle
+    variables:
+      BUILD_COMMAND: "gradle build jacocoTestReport sonarqube ci --no-daemon -PCI=true -Dhttp.proxyHost -Dhttps.proxyHost"
+    stage: build
+    image: 660598663923.dkr.ecr.eu-central-1.amazonaws.com/awscli:latest
+    script:
+      - "${BUILD_COMMAND}"
+      - "mv .ebextensions ${BUILD_FOLDER}/libs/ && mv Procfile ${BUILD_FOLDER}/libs/"
+    when: on_success
+    except:
+      - tags
+    artifacts:
+      paths:
+        - "${BUILD_FOLDER}"
+    tags:
+      - aws
+
+stages:
+  - build
+#  - pages
+  - sandbox
+  - qa
+
+
+build-gradle:
+  <<: *build_gradle
+  image: 660598663923.dkr.ecr.eu-central-1.amazonaws.com/gradle-runner:latest
+
+
+build-master-only-release:
+  <<: *build_gradle
+  variables:
+     BUILD_COMMAND: "gradle release --no-daemon -PCI=true -Dhttp.proxyHost -Dhttps.proxyHost -Prelease.stage=final -Dorg.ajoberstar.grgit.auth.force=hardcoded -Dorg.ajoberstar.grgit.auth.username=${GIT_USER} -Dorg.ajoberstar.grgit.auth.password=${GIT_PWD}"
+  image: 660598663923.dkr.ecr.eu-central-1.amazonaws.com/gradle-runner:latest
+  when: on_success
+  only:
+    - master
+
+#pages:
+#  stage: pages
+#  when: on_success
+#  script:
+#    - mkdir -p .public/testreport .public/coveragereport
+#    - "cp -r ${BUILD_FOLDER}/reports/tests/test/* .public/testreport"
+#    - "cp -r ${BUILD_FOLDER}/reports/jacoco/test/html/* .public/coveragereport"
+#    - export createddate=$(date +"%Y-%m-%d %H:%M:%S %Z")
+#    - eval "echo \"${gitlab_pages_index}\"" > .public/index.html
+#    - mv .public public
+#  artifacts:
+#    paths:
+#    - public
+#  except:
+#    - tags
+#  dependencies:
+#    - build-gradle
+#    - build-master-only-release
+
+sandbox-beanstalk:
+  <<: *deploy_cloud
+  stage: sandbox
+  variables:
+    PROFILE: "--profile sandbox"
+    TARGET_ENV: "dev"
+    TARGET_ACCOUNT: "sandbox"
+
+qa-beanstalk:
+  <<: *deploy_cloud
+  stage: qa
+  variables:
+    PROFILE: ""
+    TARGET_ENV: "ver"
+    TARGET_ACCOUNT: "qa"
